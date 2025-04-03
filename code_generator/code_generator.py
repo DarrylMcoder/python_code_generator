@@ -97,7 +97,7 @@ class CodeGenerator:
     def generate_code(self, prompt, code_context=""):
         prompt = f"{code_context}\n\n{prompt}"
         prompt += "- Generate Python code as described.\n"
-        prompt += "- Document the code clearly and concisely with comments to explain what the code does.\n"
+        prompt += "- If appropriate, document the code clearly and concisely with comments to explain what the code does.\n"
         prompt += "- If it is a function, add a docstring to the function.\n"
         prompt += "- Do not generate any additional code beside the code that is described.\n"
         prompt += "- Generate only Python code. Do not generate any explaining text aside from code comments.\n"
@@ -145,7 +145,7 @@ class CodeGenerator:
 
     def decide_which_method_sets_attribute(self, cls, attribute_name, stack):
         code_context = self.get_default_code_context(cls, attribute_name, stack)
-        prompt = f"The attribute {cls.__name__}.{attribute_name} was accessed on an instance of the class {cls.__name__} but it was not defined in the class.\n"
+        prompt = f"The attribute {attribute_name} was accessed on an instance of the class {cls.__module__}.{cls.__name__} but it was not defined in the class.\n"
         prompt += "Your job is to determine if it is a class attribute or an instance attribute.\n"
         prompt += "If the attribute should be defined as a class attribute, return 'class'. In this case, the attribute will be added to the class source as a class attribute.\n"
         prompt += "If the attribute should be defined as an instance attribute, and there is a method that can be sensibly modified to set the attribute, return the name of the method.\n"
@@ -157,17 +157,23 @@ class CodeGenerator:
         return method
 
     def get_default_code_context(self, cls, method_name, frozen_stack):
-        parent_class_sources = self.get_parent_class_sources(cls, method_name)
-        sibling_class_sources = self.get_sibling_class_sources(cls, method_name)
+        # Get the default code context
+        # Get the parent classes
+        parent_classes = self.get_all_parent_classes(cls)
+        parent_class_sources = self.get_class_sources(parent_classes, method_name)
+
+        # Get other related classes, siblings, cousins, etc
+        other_related_classes = self.get_all_related_classes(cls, excluded_classes=parent_classes)
+        other_related_class_sources = self.get_class_sources(other_related_classes, method_name)
         caller_source = self.get_calling_code(stack=frozen_stack, stack_depth=1)
         stack_trace = self.get_stack_trace(frozen_stack, start_depth=1)
         self_source = self.get_class_source(cls, method_name, full=True)
         
-        code_context = f"Parent classes of {cls.__name__}:\n {parent_class_sources}\n"
-        code_context += f"Sibling classes of {cls.__name__}:\n {sibling_class_sources}\n"
+        code_context = f"Parent classes of {cls.__module__}.{cls.__name__}:\n {parent_class_sources}\n"
+        code_context += f"Other related classes:\n {other_related_class_sources}\n"
         code_context += f"Code of around the call:\n {caller_source}\n"
         code_context += f"Stack trace: Most recent frame first:\n {stack_trace}\n"
-        code_context += f"Code of class {cls.__name__}:\n {self_source}\n"
+        code_context += f"Code of class {cls.__module__}.{cls.__name__}:\n {self_source}\n"
 
         return code_context
 
@@ -181,15 +187,15 @@ class CodeGenerator:
     def get_class_source(self, cls, name, full=False):
         if full:
             try:
-                source = ""
+                source = f"{cls.__module__}.{cls.__name__}:\n"
                 source_lines, lineno = inspect.getsourcelines(cls)
                 source += self.add_line_numbers(source_lines, start=lineno)
                 return source
             except (OSError, TypeError):
-                return f"{cls.__name__} source unavailable"
+                return f"{cls.__module__}.{cls.__name__} source unavailable"
 
         # full=False, retrieve the source of the class with some code removed
-        source = ""
+        source = f"{cls.__module__}.{cls.__name__}:\n"
         # Add the class def line and the method implementation to the source
         try:
             class_source, lineno = inspect.getsourcelines(cls)
@@ -197,7 +203,7 @@ class CodeGenerator:
         except (OSError, TypeError):
             # Class source could not be found
             # No use in continuing
-            return f"{cls.__name__} source unavailable"
+            return f"{cls.__module__}.{cls.__name__} source unavailable"
 
         # Add the source of the __init__ method
         if "__init__" in cls.__dict__:
@@ -226,34 +232,53 @@ class CodeGenerator:
                         source += f"{lineno}: {attr_name}={attr}\n"
         return source
 
-    def get_parent_class_sources(self, klass, name):
-        parent_class_sources = []
-        for cls in klass.__mro__[:-1]:
-            # Skip the class itself
-            if cls is klass \
-            or cls is object \
-            or cls.__name__ == "GenerativeBase":
+    def get_class_sources(self, classes, name):
+        sources = ""
+        for cls in classes:
+            sources += self.get_class_source(cls, name)
+        return sources
+
+    def get_all_related_classes(self, cls, excluded_classes=None):
+        subclass_families = []
+        parent_classes = self.get_all_parent_classes(cls)
+        for parent in parent_classes:
+            parent_subclasses = self.get_all_subclasses(parent)
+            # Has to be for loop here instead of list comprehension so we can get subclasses of excluded classes
+            if excluded_classes is not None and parent not in excluded_classes:
+                parent_subclasses.append(parent)
+
+            # Remove all in excluded_classes
+            if excluded_classes is not None:
+                parent_subclasses = [c for c in parent_subclasses if c not in excluded_classes]
+            subclass_families.append(parent_subclasses)
+        # Combine the freundshachts into generations so the 'ages' are closer together in the list
+        zipped_subclass_families = zip(*subclass_families)
+        subclass_generations = [list(gen) for gen in zipped_subclass_families]
+        # Flatten the generations
+        classes = [cls for gen in subclass_generations for cls in gen]
+        return classes
+
+    def get_all_parent_classes(self, cls, excluded_classes=None):
+        parent_classes = []
+        for parent in cls.__mro__:
+            if excluded_classes is not None and parent in excluded_classes:
                 continue
-            source = self.get_class_source(cls, name)
-            parent_class_sources.append(source)
+            if parent.__name__ == "GenerativeBase"\
+            or parent is object\
+            or parent is cls:
+                continue
+            parent_classes.append(parent)
+        # Closest ancestors first
+        parent_classes.reverse()
+        return parent_classes
 
-        # Reverse the list to get the sources in the correct order
-        parent_class_sources.reverse()
-
-        return "\n".join(parent_class_sources)
-
-    def get_sibling_class_sources(self, cls, name):
-        #TODO: Add cousin classes
-        sibling_class_sources = []
-        for parent in cls.__bases__:
-            subclasses = parent.__subclasses__()
-            for subclass in subclasses:
-                if subclass is cls:
-                    continue
-                source = self.get_class_source(subclass, name)
-                sibling_class_sources.append(source)
-
-        return "\n".join(sibling_class_sources)
+    def get_all_subclasses(self, cls, excluded_classes=None):
+        subclasses = []
+        for subclass in cls.__subclasses__():
+            if excluded_classes is not None and subclass not in excluded_classes:
+                subclasses.append(subclass)
+            subclasses.extend(self.get_all_subclasses(subclass, excluded_classes))
+        return subclasses
 
     def get_calling_code(self, stack=None, stack_depth=0, slice_pre=10, slice_post=10):
         caller_source = ""
@@ -299,7 +324,7 @@ class CodeGenerator:
             return response
         except subprocess.CalledProcessError as e:
             if try_count > 3:
-                raise CodeWriterException("AI prompt failed too many times")
+                raise CodeGenerationException(f"AI prompt failed too many times. {e.stderr}")
             return self.prompt_ai(prompt, try_count + 1)
 
 

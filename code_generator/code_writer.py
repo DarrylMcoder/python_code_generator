@@ -1,7 +1,5 @@
-import os
 import inspect
 import subprocess
-from . import config
 from .code_generator import CodeGenerator
 from .exceptions import CodeWriterException
 
@@ -24,12 +22,6 @@ class CodeWriter(CodeGenerator):
             # No code to insert; Nothing to do
             return class_source
 
-        # Add indentation to the code
-        # And define code_lines
-        code_lines = code.split("\n")
-        for i, line in enumerate(code_lines):
-            code_lines[i] = f"    {line}"
-
         # Add line numbers to the class source
         lines = class_source.split("\n")
         class_source = "Class source:\n"
@@ -41,7 +33,7 @@ class CodeWriter(CodeGenerator):
         prompt += "Please choose a line number from the class source above.\n"
         prompt += "Return the line number as a string.\n"
         prompt += "The line number must be between 1 and the number of lines in the class source and it must be a whole number.\n"
-        prompt += "The code will be inserted at that line number.\n"
+        prompt += "The code will be inserted in the class source immediately before the code at that line number.\n"
 
         line_number = self.generate_info(prompt, class_source)
 
@@ -54,16 +46,20 @@ class CodeWriter(CodeGenerator):
             raise CodeWriterException(f"Invalid line number: {line_number}")
 
         # Add AI watermark
-        code = f"""
-
-## AI GENERATED CODE; PLEASE REVIEW ##
+        code = code.strip()
+        code = f"""## AI GENERATED CODE; PLEASE REVIEW ##
 {code}
 ## END OF AI GENERATED CODE ##
         """
 
-        # Insert the code at the line number
-        lines_before = lines[:line_number - 1]
-        lines_after = lines[line_number - 1:]
+        # Add indentation to the code
+        # And define code_lines
+        code_lines = code.split("\n")
+        code_lines = [f"    {line}" for line in code_lines]
+
+       # Insert the code at the line number
+        lines_before = lines[:line_number]
+        lines_after = lines[line_number:]
         new_lines = lines_before + code_lines + lines_after
         new_class_source = "\n".join(new_lines)
         return new_class_source
