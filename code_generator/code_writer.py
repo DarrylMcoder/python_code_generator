@@ -1,19 +1,15 @@
+import os
 import inspect
-import traceback
 import subprocess
+from . import config
 from .code_generator import CodeGenerator
 from .exceptions import CodeWriterException
 
 class CodeWriter(CodeGenerator):
     def insert_code(self, cls=None, main_source=None, code="") -> str:
-        # Add indentation to the code
-        code_lines = code.split("\n")
-        for i, line in enumerate(code_lines):
-            code_lines[i] = f"    {line}"
-
+        # Validate inputs
         if cls and main_source:
             raise ValueError("Cannot specify both cls and main_source")
-
         if cls:
             # Get the class source
             class_file = inspect.getsourcefile(cls)
@@ -28,6 +24,12 @@ class CodeWriter(CodeGenerator):
             # No code to insert; Nothing to do
             return class_source
 
+        # Add indentation to the code
+        # And define code_lines
+        code_lines = code.split("\n")
+        for i, line in enumerate(code_lines):
+            code_lines[i] = f"    {line}"
+
         # Add line numbers to the class source
         lines = class_source.split("\n")
         class_source = "Class source:\n"
@@ -38,6 +40,7 @@ class CodeWriter(CodeGenerator):
         prompt += f"Code to insert:\n{code}\n\n"
         prompt += "Please choose a line number from the class source above.\n"
         prompt += "Return the line number as a string.\n"
+        prompt += "The line number must be between 1 and the number of lines in the class source and it must be a whole number.\n"
         prompt += "The code will be inserted at that line number.\n"
 
         line_number = self.generate_info(prompt, class_source)
@@ -50,6 +53,14 @@ class CodeWriter(CodeGenerator):
         if not (1 <= line_number <= len(lines)):
             raise CodeWriterException(f"Invalid line number: {line_number}")
 
+        # Add AI watermark
+        code = f"""
+
+## AI GENERATED CODE; PLEASE REVIEW ##
+{code}
+## END OF AI GENERATED CODE ##
+        """
+
         # Insert the code at the line number
         lines_before = lines[:line_number - 1]
         lines_after = lines[line_number - 1:]
@@ -57,35 +68,54 @@ class CodeWriter(CodeGenerator):
         new_class_source = "\n".join(new_lines)
         return new_class_source
 
+    def replace_code(self, cls=None, main_source=None, old_code="", new_code="") -> str:
+        if cls and main_source:
+            raise ValueError("Cannot specify both cls and main_source")
+
+        if cls:
+            # Get the class source
+            class_file = inspect.getsourcefile(cls)
+            with open(class_file) as f:
+                class_source = f.read()
+        elif main_source:
+            class_source = main_source
+        else:
+            raise ValueError("Must specify either cls or main_source")
+
+        if not new_code.strip():
+            # No code to insert; Nothing to do
+            return class_source
+
+        if not old_code.strip():
+            return self.insert_code(cls=cls, main_source=main_source, code=new_code)
+
+        # Indent the new code
+        new_code = new_code.replace("\n", "\n    ")
+
+        replacement_str = f"""
+## AI MODIFIED CODE; PLEASE REVIEW ##
+{new_code}
+## END OF AI MODIFIED CODE ##
+
+## ORIGINAL CODE; REMOVE WHEN REVIEWED ##
+\"\"\"
+{old_code}
+\"\"\"
+## END OF ORIGINAL CODE ##
+"""
+
+        new_class_source = class_source.replace(old_code, replacement_str)
+
+        return new_class_source
+
+
     def commit_changes(self, cls, class_source, commit_message):
         class_file = inspect.getsourcefile(cls)
-        # Commit to git in the ai-assistant branch
-        # Save the developer's changes
-        self.git_stash()
 
-        current_branch = self.git_current_branch()
-        self.git_switch("ai-assistant")
-
-        try:
-            # Write to the class source file
-            with open(class_file, "w") as f:
-                f.write(class_source)
-
-            self.git_add(class_file)
-            self.git_commit(commit_message)
-            self.git_switch(current_branch)
-            self.git_stash_pop()
-        except Exception as e:
-            # Commit failed, restore the developer's changes
-            # Reraise the exception
-            self.git_switch(current_branch)
-            self.git_stash_pop()
-            raise
-
-    def sanitize(self, message):
-        # Sanitize the commit message
-        message = message.replace("`", "")
-        return message
+        # Write to the class source file
+        # Simpler than using git for now :)-
+        with open(class_file, "w") as f:
+            f.write(class_source)
 
     def git_stash(self):
         print("Stashing changes...")
@@ -103,25 +133,34 @@ class CodeWriter(CodeGenerator):
         print(f"Switching to branch {branch_name}...")
         try:
             subprocess.run(["git", "switch", branch_name], check=True)
-        except subprocess.CalledProcessError:
-            self.shell(["git", "branch", branch_name])
-            self.shell(["git", "switch", branch_name])
+        except subprocess.CalledProcessError as e:
+            if e.stderr and e.stderr.contains("invalid reference: ai-assistant"):
+                self.shell(["git", "branch", branch_name])
+                self.shell(["git", "switch", branch_name])
+            else:
+                raise CodeWriterException(f"Error switching to branch {branch_name}: {e.stderr}")
 
     def git_add(self, filename):
         print(f"Adding {filename} to git...")
-        self.shell(["git", "add", filename.strip()])
+        self.shell(["git", "add", filename])
+
+    def git_status(self):
+        print("Getting git status...")
+        return self.shell(["git", "status"])
 
     def git_commit(self, message):
         print("Committing changes...")
-        # Sanitize the commit message
-        message = self.sanitize(message)
         self.shell(["git", "commit", "-m", message])
+
+    def git_merge(self, branch):
+        print(f"Merging branch {branch}...")
+        self.shell(["git", "merge", branch])
 
     def shell(self, command):
         print(f"Running shell command: {' '.join(command)}")
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
         except subprocess.CalledProcessError as e:
-            raise CodeWriterException(f"Error running shell command: {e}\n{traceback.format_exc()}")
+            raise CodeWriterException(f"Error running shell command: {e.stderr}")
         else:
             return result.stdout.strip()
